@@ -91,10 +91,16 @@ NOMMU では mprotect が使えないので、static-pie のバイナリは必�
 ## ビルド手順
 
 ```
-# upstream のツリーを用意する
-git clone https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
-cd linux
-git checkout cbfffcca2bf0622b601b7eaf477aa29035169184
+# upstream のツリーを用意する(ベースのコミットだけを取ってくる浅い clone)
+mkdir linux && cd linux
+git init
+git remote add origin https://github.com/torvalds/linux.git
+git fetch --depth 1 origin cbfffcca2bf0622b601b7eaf477aa29035169184
+git checkout FETCH_HEAD
+#   全履歴が必要な場合は、上の代わりに次を使う(数 GB あり、時間がかかる):
+#   git clone https://github.com/torvalds/linux.git
+#   cd linux
+#   git checkout cbfffcca2bf0622b601b7eaf477aa29035169184
 
 # 差分を当てる(R はこのリポジトリのパス)
 R=~/linux/linux_for_my-riscv-rv32i-dc
