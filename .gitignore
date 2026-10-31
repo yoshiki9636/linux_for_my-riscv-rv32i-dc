@@ -1,0 +1,12 @@
+# ビルドで作るもの(REPRO_FILES.md の「ビルド手順」参照)
+/linux/
+/initramfs.cpio
+/initramfs.cpio.bak*
+/Image.reloc
+/Image.hex
+/start/start.o
+/start/start.elf
+/initramfs/busybox/
+/initramfs/mtest
+/initramfs/initramfs.list
+.*.swp

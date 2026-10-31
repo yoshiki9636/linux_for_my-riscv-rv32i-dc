@@ -4,11 +4,31 @@
 
 import struct, subprocess as sp, tempfile, os, sys
 
+# Paths (2026-11-01): this script lives at the top of the repro repo, and the
+# kernel tree is always cloned/built in linux/ right under it. Kernel build
+# outputs are read from linux/; initramfs.cpio, start/start.elf and the
+# Image.reloc/Image.hex outputs live next to this script. All paths are based
+# on this script's location, so it works from any current directory.
+TOP  = os.path.dirname(os.path.abspath(__file__))
+KDIR = os.path.join(TOP, 'linux')
+VMLINUX   = os.path.join(KDIR, 'vmlinux')
+SYSMAP    = os.path.join(KDIR, 'System.map')
+IMAGE     = os.path.join(KDIR, 'arch/riscv/boot/Image')
+DTB       = os.path.join(KDIR, 'arch/riscv/boot/dts/myfpga/my_fpga.dtb')
+INITRAMFS = os.path.join(TOP, 'initramfs.cpio')
+START_ELF = os.path.join(TOP, 'start/start.elf')
+OUT_RELOC = os.path.join(TOP, 'Image.reloc')
+OUT_HEX   = os.path.join(TOP, 'Image.hex')
+for _p in (VMLINUX, SYSMAP, IMAGE, DTB, INITRAMFS, START_ELF):
+    if not os.path.isfile(_p):
+        sys.exit(f'ERROR: {_p} not found (kernel must be built in {KDIR}, '
+                 f'start.elf in {os.path.join(TOP, "start")})')
+
 # FPGA (2026-10-29): while the kernel was CONFIG_RELOCATABLE, vmlinux was
 # linked with -shared and an undefined symbol was NOT a link error (the call
 # silently went to address 0, #866). Since AR-899 the kernel is
 # non-relocatable so the linker catches it, but keep this cheap check.
-_undef = sp.run(['riscv32-unknown-linux-gnu-nm', '-u', 'vmlinux'],
+_undef = sp.run(['riscv32-unknown-linux-gnu-nm', '-u', VMLINUX],
                 capture_output=True, text=True, check=True).stdout.split()
 _undef = [s for s in _undef if s != 'U']
 if _undef:
@@ -16,7 +36,7 @@ if _undef:
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-def load_sysmap(path='System.map'):
+def load_sysmap(path=SYSMAP):
     syms = {}
     with open(path) as f:
         for line in f:
@@ -25,7 +45,7 @@ def load_sysmap(path='System.map'):
                 syms[parts[2]] = int(parts[0], 16)
     return syms
 
-def load_sysmap_code_symbols(path='System.map'):
+def load_sysmap_code_symbols(path=SYSMAP):
     """Sorted (addr, name) list of code-type symbols (t/T/w/W), for the
     overlay collision check below."""
     entries = []
@@ -92,7 +112,7 @@ def extend_to(buf, size):
 
 # ── load Image ───────────────────────────────────────────────────────────────
 
-with open('arch/riscv/boot/Image', 'rb') as f:
+with open(IMAGE, 'rb') as f:
     mem = bytearray(f.read())
 
 syms = load_sysmap()
@@ -141,7 +161,7 @@ DTB_ADDR = 0x00801000
 
 # ── 15. DTB @ DTB_ADDR ───────────────────────────────────────────────────────
 
-with open('arch/riscv/boot/dts/myfpga/my_fpga.dtb', 'rb') as f:
+with open(DTB, 'rb') as f:
     dtb = f.read()
 check_overlay_collision(code_syms, 'DTB', DTB_ADDR, len(dtb))
 extend_to(mem, DTB_ADDR + len(dtb))
@@ -158,7 +178,7 @@ INITRD_ADDR = 0x00900000
 # here if the cpio ever outgrows it, instead of silently truncating again.
 # 2026-10-27: widened to 0xB00000 for the ~1.12MB multi-applet busybox.
 INITRD_END_DTS = 0x00B00000
-with open('initramfs.cpio', 'rb') as f:
+with open(INITRAMFS, 'rb') as f:
     initrd = bytearray(f.read())
 if INITRD_ADDR + len(initrd) > INITRD_END_DTS:
     raise SystemExit(
@@ -207,7 +227,7 @@ try:
     sp.check_call([
         'riscv32-unknown-linux-gnu-objcopy',
         '-O', 'binary', '--only-section=.text.start',
-        './start/start.elf', _tmp
+        START_ELF, _tmp
     ])
     with open(_tmp, 'rb') as f:
         stub = f.read()
@@ -236,7 +256,7 @@ try:
     sp.check_call([
         'riscv32-unknown-linux-gnu-objcopy',
         '-O', 'binary', '--only-section=.text',
-        './start/start.elf', _tmp
+        START_ELF, _tmp
     ])
     with open(_tmp, 'rb') as f:
         code = f.read()
@@ -256,14 +276,14 @@ print(f'CODE: {len(code)} bytes @ {CODE_ADDR:#010x}')
 
 # ── output ───────────────────────────────────────────────────────────────────
 
-with open('Image.reloc', 'wb') as f:
+with open(OUT_RELOC, 'wb') as f:
     f.write(mem)
-print('Output: Image.reloc')
+print(f'Output: {OUT_RELOC}')
 
 # Generate Image.hex: one 32-bit LE word per line, format " xxxxxxxx\n"
-with open('Image.hex', 'w') as f:
+with open(OUT_HEX, 'w') as f:
     for i in range(0, len(mem), 4):
         chunk = bytes(mem[i:i+4]) + b'\x00' * (4 - len(mem[i:i+4]))
         w = struct.unpack_from('<I', chunk, 0)[0]
         f.write(f' {w:08x}\n')
-print('Output: Image.hex')
+print(f'Output: {OUT_HEX}')
