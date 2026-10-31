@@ -1,0 +1,10 @@
+#!/bin/sh
+echo "STEP1: shell alive"
+mount -t proc none /proc
+echo "STEP2: proc mounted"
+mount -t sysfs none /sys
+echo "STEP3: sysfs mounted"
+echo "==========================="
+echo " FPGA RISC-V Linux起動成功！"
+echo "==========================="
+exec /bin/sh

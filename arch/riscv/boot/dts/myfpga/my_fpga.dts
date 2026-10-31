@@ -1,0 +1,93 @@
+/* my_fpga.dts */
+/dts-v1/;
+
+/ {
+    #address-cells = <1>;
+    #size-cells    = <1>;
+    compatible = "myvendor,my-fpga-riscv";
+
+memory@400000 {
+    device_type = "memory";
+    /* FPGA (2026-07-05): retrying the full 128MB hardware DRAM range.
+     * This was previously attempted and reverted to 4MB-64MB (60MB)
+     * after it caused an immediate crash/reset loop elsewhere in mm
+     * init (root cause not identified at the time). That revert
+     * predates this session's discovery and RTL-side fix of the
+     * self-modifying-code/DRAM-timing wild-jump hazard - it's plausible
+     * the wider memory map simply made that hazard easier to hit (more
+     * memblock/page-allocator activity, different top-down allocation
+     * addresses), not that this memory node's size is itself a problem.
+     * Now that the RTL fix has held clean across multiple boots, retry
+     * with the real 128MB ceiling (see arch/riscv/kernel/head.S for the
+     * matching boot-stack-pointer move). If this reproduces the old
+     * crash/reset loop, revert both this and head.S together. */
+    reg = <0x00400000 0x07C00000>; /* 4MB to 128MB (124MB) */
+};
+
+    cpus {
+        #address-cells = <1>;
+        #size-cells    = <0>;
+        /* timebase-frequency = <50000000>; */
+        timebase-frequency = <50000000>;
+        cpu0: cpu@0 {
+            device_type = "cpu";
+            compatible  = "riscv";
+            riscv,isa   = "rv32ima";
+            reg         = <0>;
+
+            cpu0_intc: interrupt-controller {
+                interrupt-parent;
+                compatible = "riscv,cpu-intc";
+                interrupt-controller;
+                #interrupt-cells = <1>;
+            };
+        };
+    };
+
+    soc {
+        #address-cells = <1>;
+        #size-cells    = <1>;
+        compatible     = "simple-bus";
+        ranges;
+		interrupt-parent = <&cpu0_intc>;
+
+        /* ★あなたのUARTアドレスに合わせる★ */
+        uart0: uart@c000fc00 {
+            compatible  = "myvendor,myuart";
+            reg         = <0xc000fc00 0x100>;
+			clock-frequency = <50000000>;
+            /* RX interrupt -> mip.MEIP (machine external, hwirq 11) */
+            interrupts-extended = <&cpu0_intc 11>;
+        };
+
+		clint0: clint@c000f800 {
+    		compatible = "riscv,clint0","sifive,clint0";
+    		reg = <0xc000f800 0x100>;
+
+    		/* interrupts-extended = < &cpu0_intc 7>; */
+    		interrupts-extended =  <&cpu0_intc 3 &cpu0_intc 7>; 
+		};
+
+    };
+
+    chosen {
+        /* The only copy of the kernel command line (make_image_reloc.py
+         * no longer pokes boot_command_line). Add slub_debug=FZPU /
+         * keep_bootcon here again when hunting memory corruption. */
+        bootargs = "earlycon=myuart,mmio32,0xc000fc00 console=ttyMY0,921600 log_buf_len=64K root=/dev/ram rdinit=/init loglevel=8";
+		linux,initrd-start = <0x00900000>;
+		/* FPGA (2026-07-16): 0x913000 was sized for the old 74KB
+		 * initramfs and silently truncated the current 978KB
+		 * busybox cpio (end 0x9EEE0C) to its first 77KB - /init
+		 * (last member) was never extracted. 0xA00000 gives fixed
+		 * headroom; make_image_reloc.py now hard-fails if the cpio
+		 * outgrows this window (keep both values in sync). The gap
+		 * between the real cpio end and 0xA00000 is zero-filled by
+		 * the image build, which the cpio unpacker skips cleanly.
+		 * 2026-10-27: widened 0xA00000 -> 0xB00000 for the rebuilt
+		 * busybox (hush + echo/mount/ls/cat/dmesg/... applets, static-
+		 * pie glibc, ~1.12MB) which no longer fits in 1MB. */
+		linux,initrd-end   = <0x00B00000>;
+        stdout-path = "/soc/uart@c000fc00";
+    };
+};

@@ -1,0 +1,781 @@
+diff --git a/arch/riscv/boot/dts/Makefile b/arch/riscv/boot/dts/Makefile
+index 69d8751fb..f3123edf0 100644
+--- a/arch/riscv/boot/dts/Makefile
++++ b/arch/riscv/boot/dts/Makefile
+@@ -12,3 +12,4 @@ subdir-y += spacemit
+ subdir-y += starfive
+ subdir-y += tenstorrent
+ subdir-y += thead
++subdir-y += myfpga
+diff --git a/arch/riscv/kernel/entry.S b/arch/riscv/kernel/entry.S
+index 60eb22129..05210cce9 100644
+--- a/arch/riscv/kernel/entry.S
++++ b/arch/riscv/kernel/entry.S
+@@ -186,6 +186,17 @@ SYM_CODE_START(handle_exception)
+ 	csrr s3, CSR_TVAL
+ 	csrr s4, CSR_CAUSE
+ 	csrr s5, CSR_SCRATCH
++	/*
++	 * FPGA: the CPU has no U-mode, so a trap from userspace still leaves
++	 * mstatus.MPP = M. ret_from_exception decides kernel vs. user return
++	 * from the saved MPP, so clear it when the trap came from userspace
++	 * (sscratch held the user tp, i.e. s5 != tp).
++	 */
++	beq s5, tp, 9f
++	li t2, SR_MPP
++	not t2, t2
++	and s1, s1, t2
++9:
+ 	REG_S s0, PT_SP(sp)
+ 	REG_S s1, PT_STATUS(sp)
+ 	REG_S s2, PT_EPC(sp)
+diff --git a/arch/riscv/kernel/head.S b/arch/riscv/kernel/head.S
+index 9c99c5ad6..c906b2c43 100644
+--- a/arch/riscv/kernel/head.S
++++ b/arch/riscv/kernel/head.S
+@@ -84,7 +84,7 @@ relocate_enable_mmu:
+ 	/* Point stvec to virtual address of intruction after satp write */
+ 	la a2, 1f
+ 	add a2, a2, a1
+-	csrw CSR_TVEC, a2
++	csrw CSR_MTVEC, a2
+ 
+ 	/* Compute satp for kernel page tables, but don't load it yet */
+ 	srl a2, a0, PAGE_SHIFT
+@@ -109,7 +109,7 @@ relocate_enable_mmu:
+ 1:
+ 	/* Set trap vector to spin forever to help debug */
+ 	la a0, .Lsecondary_park
+-	csrw CSR_TVEC, a0
++	csrw CSR_MTVEC, a0
+ 
+ 	/* Reload the global pointer */
+ 	load_global_pointer
+@@ -129,8 +129,8 @@ relocate_enable_mmu:
+ 	.global secondary_start_sbi
+ secondary_start_sbi:
+ 	/* Mask all interrupts */
+-	csrw CSR_IE, zero
+-	csrw CSR_IP, zero
++	csrw CSR_MIE, zero
++	csrw CSR_MIP, zero
+ 
+ #ifndef CONFIG_RISCV_M_MODE
+ 	/* Enable time CSR */
+@@ -146,11 +146,11 @@ secondary_start_sbi:
+ 	 * floating point or vector in kernel space
+ 	 */
+ 	li t0, SR_FS_VS
+-	csrc CSR_STATUS, t0
++	csrc CSR_MSTATUS, t0
+ 
+ 	/* Set trap vector to spin forever to help debug */
+ 	la a3, .Lsecondary_park
+-	csrw CSR_TVEC, a3
++	csrw CSR_MTVEC, a3
+ 
+ 	/* a0 contains the hartid & a1 contains boot data */
+ 	li a2, SBI_HART_BOOT_TASK_PTR_OFFSET
+@@ -203,21 +203,21 @@ secondary_start_sbi:
+ .Lsetup_trap_vector:
+ 	/* Set trap vector to exception handler */
+ 	la a0, handle_exception
+-	csrw CSR_TVEC, a0
++	csrw CSR_MTVEC, a0
+ 
+ 	/*
+ 	 * Set sup0 scratch register to 0, indicating to exception vector that
+ 	 * we are presently executing in kernel.
+ 	 */
+-	csrw CSR_SCRATCH, zero
++	csrw CSR_MSCRATCH, zero
+ 	ret
+ 
+ SYM_CODE_END(_start)
+ 
+ SYM_CODE_START(_start_kernel)
+ 	/* Mask all interrupts */
+-	csrw CSR_IE, zero
+-	csrw CSR_IP, zero
++	csrw CSR_MIE, zero
++	csrw CSR_MIP, zero
+ 
+ #ifdef CONFIG_RISCV_M_MODE
+ 	/* flush the instruction cache */
+@@ -232,7 +232,7 @@ SYM_CODE_START(_start_kernel)
+ 	 * touching the PMPs on any trap.
+ 	 */
+ 	la a0, .Lpmp_done
+-	csrw CSR_TVEC, a0
++	csrw CSR_MTVEC, a0
+ 
+ 	li a0, -1
+ 	csrw CSR_PMPADDR0, a0
+@@ -260,7 +260,7 @@ SYM_CODE_START(_start_kernel)
+ 	 * floating point or vector in kernel space
+ 	 */
+ 	li t0, SR_FS_VS
+-	csrc CSR_STATUS, t0
++	csrc CSR_MSTATUS, t0
+ 
+ #ifdef CONFIG_RISCV_BOOT_SPINWAIT
+ 	li t0, CONFIG_NR_CPUS
+@@ -331,7 +331,7 @@ SYM_CODE_START(_start_kernel)
+ #endif /* CONFIG_BUILTIN_DTB */
+ 	/* Set trap vector to spin forever to help debug */
+ 	la a3, .Lsecondary_park
+-	csrw CSR_TVEC, a3
++	csrw CSR_MTVEC, a3
+ 	call setup_vm
+ #ifdef CONFIG_MMU
+ 	la a0, early_pg_dir
+@@ -370,7 +370,7 @@ SYM_CODE_START(_start_kernel)
+ .Lsecondary_start:
+ 	/* Set trap vector to spin forever to help debug */
+ 	la a3, .Lsecondary_park
+-	csrw CSR_TVEC, a3
++	csrw CSR_MTVEC, a3
+ 
+ 	slli a3, a0, LGREG
+ 	la a1, __cpu_spinwait_stack_pointer
+@@ -427,7 +427,7 @@ SYM_CODE_START_LOCAL(reset_regs)
+ 	li	t4, 0
+ 	li	t5, 0
+ 	li	t6, 0
+-	csrw	CSR_SCRATCH, 0
++	csrw	CSR_MSCRATCH, 0
+ 
+ #ifdef CONFIG_FPU
+ 	csrr	t0, CSR_MISA
+@@ -435,7 +435,7 @@ SYM_CODE_START_LOCAL(reset_regs)
+ 	beqz	t0, .Lreset_regs_done_fpu
+ 
+ 	li	t1, SR_FS
+-	csrs	CSR_STATUS, t1
++	csrs	CSR_MSTATUS, t1
+ 	fmv.s.x	f0, zero
+ 	fmv.s.x	f1, zero
+ 	fmv.s.x	f2, zero
+@@ -485,7 +485,7 @@ SYM_CODE_START_LOCAL(reset_regs)
+ 	 * and this form of vsetvli is defined to set vl to VLMAX.
+ 	 */
+ 	li	t1, SR_VS
+-	csrs	CSR_STATUS, t1
++	csrs	CSR_MSTATUS, t1
+ 	csrs	CSR_VCSR, x0
+ 	vsetvli t1, x0, e8, m8, ta, ma
+ 	vmv.v.i v0, 0
+diff --git a/arch/riscv/kernel/traps.c b/arch/riscv/kernel/traps.c
+index 5fb57fad1..86761e850 100644
+--- a/arch/riscv/kernel/traps.c
++++ b/arch/riscv/kernel/traps.c
+@@ -253,8 +253,20 @@ DO_ERROR_INFO(do_trap_store_fault,
+ 	SIGSEGV, SEGV_ACCERR, "store (or AMO) access fault");
+ DO_ERROR_INFO(do_trap_ecall_s,
+ 	SIGILL, ILL_ILLTRP, "environment call from S-mode");
+-DO_ERROR_INFO(do_trap_ecall_m,
+-	SIGILL, ILL_ILLTRP, "environment call from M-mode");
++/*
++ * FPGA: the CPU has no U-mode, so userspace also runs in M-mode and every
++ * syscall arrives as mcause=11. entry.S clears the saved MPP for traps from
++ * userspace, so user_mode(regs) tells real syscalls apart.
++ */
++asmlinkage __visible __trap_section void do_trap_ecall_m(struct pt_regs *regs)
++{
++	if (user_mode(regs)) {
++		do_trap_ecall_u(regs);
++		return;
++	}
++	do_trap_error(regs, SIGILL, ILL_ILLTRP, regs->epc,
++		      "Oops - environment call from M-mode");
++}
+ 
+ static inline unsigned long get_break_insn_length(unsigned long pc)
+ {
+diff --git a/drivers/clocksource/timer-clint.c b/drivers/clocksource/timer-clint.c
+index 0bdd9d7ec..6b78f54f7 100644
+--- a/drivers/clocksource/timer-clint.c
++++ b/drivers/clocksource/timer-clint.c
+@@ -29,8 +29,9 @@
+ #endif
+ 
+ #define CLINT_IPI_OFF		0
+-#define CLINT_TIMER_CMP_OFF	0x4000
+-#define CLINT_TIMER_VAL_OFF	0xbff8
++/* FPGA: this board's timer block is MTIME@+0, MTIMECMP@+8, FRC ctrl@+0x10 */
++#define CLINT_TIMER_CMP_OFF	0x0008
++#define CLINT_TIMER_VAL_OFF	0x0000
+ 
+ /* CLINT manages IPI and Timer for RISC-V M-mode  */
+ static u32 __iomem *clint_ipi_base;
+@@ -111,11 +112,19 @@ static struct clocksource clint_clocksource = {
+ static int clint_clock_next_event(unsigned long delta,
+ 				   struct clock_event_device *ce)
+ {
+-	void __iomem *r = clint_timer_cmp +
+-			  cpuid_to_hartid_map(smp_processor_id());
++	void __iomem *r = clint_timer_cmp;
++	u64 target = clint_get_cycles64() + delta;
+ 
++	/*
++	 * FPGA: MTIMECMP is two 32-bit registers. Hold cmp_hi at max while
++	 * cmp_lo changes so no intermediate value matches, and enable MTIE
++	 * only after the new compare value is in place (the FRC latches a
++	 * match only while MTIE is set).
++	 */
++	writel_relaxed(0xffffffff, r + 4);
++	writel_relaxed((u32)target, r);
++	writel_relaxed((u32)(target >> 32), r + 4);
+ 	csr_set(CSR_IE, IE_TIE);
+-	writeq_relaxed(clint_get_cycles64() + delta, r);
+ 	return 0;
+ }
+ 
+@@ -156,6 +165,12 @@ static irqreturn_t clint_timer_interrupt(int irq, void *dev_id)
+ 	struct clock_event_device *evdev = this_cpu_ptr(&clint_clock_event);
+ 
+ 	csr_clear(CSR_IE, IE_TIE);
++
++	/* FPGA: clear the FRC's latched match (0xc000f810 bit2 is
++	 * write-0-to-clear, bit0 keeps the counter running) before the
++	 * handler, so a match latched by its re-arm is not lost. */
++	writel_relaxed(1, (void __iomem *)clint_timer_val + 0x10);
++
+ 	evdev->event_handler(evdev);
+ 
+ 	return IRQ_HANDLED;
+@@ -178,7 +193,6 @@ static int __init clint_timer_init_dt(struct device_node *np)
+ 			pr_err("%pOFP: failed to parse irq %d.\n", np, i);
+ 			continue;
+ 		}
+-
+ 		if ((oirq.args_count != 1) ||
+ 		    (oirq.args[0] != RV_IRQ_TIMER &&
+ 		     oirq.args[0] != RV_IRQ_SOFT)) {
+@@ -217,6 +231,13 @@ static int __init clint_timer_init_dt(struct device_node *np)
+ 	clint_timer_val = base + CLINT_TIMER_VAL_OFF;
+ 	clint_timer_freq = riscv_timebase;
+ 
++	/* FPGA: MTIMECMP keeps its old value across the monitor reload;
++	 * park it at "never" until the first set_next_event(). */
++	writel_relaxed(0xffffffff, (void __iomem *)clint_timer_cmp + 4);
++
++	/* FPGA: start the FRC (bit0 run, bit1 clear counter) */
++	writel_relaxed(3, (void __iomem *)clint_timer_val + 0x10);
++
+ #ifdef CONFIG_RISCV_M_MODE
+ 	/*
+ 	 * Yes, that's an odd naming scheme.  time_val is public, but hopefully
+diff --git a/drivers/tty/serial/Kconfig b/drivers/tty/serial/Kconfig
+index f86775cfd..3f5ba91d4 100644
+--- a/drivers/tty/serial/Kconfig
++++ b/drivers/tty/serial/Kconfig
+@@ -1619,7 +1619,22 @@ config SERIAL_ESP32_ACM
+ 	  snippet may be used:
+ 	    earlycon=esp32s3acm,mmio32,0x60038000
+ 
+-endmenu
+ 
+ config SERIAL_MCTRL_GPIO
+ 	tristate
++
++# for FPGA
++config SERIAL_MYUART
++    tristate "My Custom FPGA UART"
++    depends on OF
++    select SERIAL_CORE
++    help
++      Driver for custom FPGA UART on RISC-V.
++
++config SERIAL_MYUART_CONSOLE
++    bool "Console on My Custom FPGA UART"
++    depends on SERIAL_MYUART=y
++    select SERIAL_CORE_CONSOLE
++    select SERIAL_EARLYCON
++
++endmenu
+diff --git a/drivers/tty/serial/Makefile b/drivers/tty/serial/Makefile
+index a2ccbc508..2eb22d4d8 100644
+--- a/drivers/tty/serial/Makefile
++++ b/drivers/tty/serial/Makefile
+@@ -94,6 +94,7 @@ obj-$(CONFIG_SERIAL_UARTLITE)		+= uartlite.o
+ obj-$(CONFIG_SERIAL_VT8500)		+= vt8500_serial.o
+ obj-$(CONFIG_SERIAL_XILINX_PS_UART)	+= xilinx_uartps.o
+ obj-$(CONFIG_SERIAL_ZS)			+= zs.o
++obj-$(CONFIG_SERIAL_MYUART)		+= myuart.o
+ 
+ # GPIOLIB helpers for modem control lines
+ obj-$(CONFIG_SERIAL_MCTRL_GPIO)	+= serial_mctrl_gpio.o
+diff --git a/drivers/tty/serial/myuart.c b/drivers/tty/serial/myuart.c
+new file mode 100644
+index 000000000..b17c26f2b
+--- /dev/null
++++ b/drivers/tty/serial/myuart.c
+@@ -0,0 +1,361 @@
++/* drivers/tty/serial/myuart.c */
++#include <linux/serial_core.h>
++#include <linux/console.h>
++#include <linux/of.h>
++#include <linux/io.h>
++#include <linux/platform_device.h>
++#include <linux/module.h>
++#include <linux/kfifo.h>
++#include <linux/timer.h>
++#include <linux/tty_flip.h>
++#include <linux/interrupt.h>
++#include <linux/percpu.h>
++
++#define UART_TX_OFFSET      0x00
++#define UART_STATUS_OFFSET  0x04
++#define UART_TX_READY       (1 << 0)  /* 1=FIFOフル, 0=送信可能 */
++#define TIOCSER_TEMT  0x01
++
++
++static void myuart_putc(char c)
++{
++    volatile uint32_t *status = (volatile uint32_t *)0xC000FC04;
++    volatile uint32_t *tx     = (volatile uint32_t *)0xC000FC00;
++    unsigned long flags;
++    /* irq-off so the not-full check and the TX write stay paired */
++    local_irq_save(flags);
++    while (*status & 0x1);
++    *tx = c;
++    local_irq_restore(flags);
++}
++
++static void myuart_early_write(struct console *con,
++                                const char *s, unsigned int n)
++{
++    unsigned int i;
++    for (i = 0; i < n; i++) {
++        myuart_putc(s[i]);
++        if (s[i] == '\n')
++            myuart_putc('\r');
++    }
++}
++
++static int __init myuart_earlycon_setup(struct earlycon_device *dev,
++                                         const char *options)
++{
++    dev->port.membase = (void __iomem *)0xC000FC00;
++    dev->con->write = myuart_early_write;
++    return 0;
++}
++
++EARLYCON_DECLARE(myuart, myuart_earlycon_setup);
++OF_EARLYCON_DECLARE(myuart, "myvendor,myuart", myuart_earlycon_setup);
++
++static void myuart_putchar(struct uart_port *port, unsigned char c)
++{
++    myuart_putc(c);
++}
++
++static void myuart_start_tx(struct uart_port *port)
++{
++    struct tty_port *tport = &port->state->port;
++    unsigned char ch;
++    while (kfifo_get(&tport->xmit_fifo, &ch)) {
++        myuart_putchar(port, ch);
++        port->icount.tx++;
++    }
++}
++
++static unsigned int myuart_tx_empty(struct uart_port *port)
++{
++    volatile uint32_t *status = (volatile uint32_t *)0xC000FC04;
++    return (*status & 0x1) ? 0 : TIOCSER_TEMT;
++}
++
++static void myuart_set_mctrl(struct uart_port *port, unsigned int mctrl) {}
++static unsigned int myuart_get_mctrl(struct uart_port *port) { return 0; }
++static void myuart_stop_tx(struct uart_port *port) {}
++static void myuart_stop_rx(struct uart_port *port) {}
++
++/* FPGA (2026-07-19): polled console INPUT via the FPGA UART RX latch.
++ * Hardware (io_uart_out.v): reading 0xC000FC0C returns
++ *   [7:0] last received byte, [8] data-ready, [9] overrun,
++ * and the READ ITSELF clears the ready/overrun flags (single-char
++ * latch, no FIFO).  0xC000FC10 bit0=1 disables the monitor's hardware
++ * echo-back (the shell does its own echo).  The monitor's LETTER
++ * commands (g/w/r/t/s/p/i/j/z/l/m) are gated off while the CPU runs
++ * (uart_rec_char.v mon_en), so ordinary shell text lands here instead
++ * of being misparsed as monitor commands.  Ctrl-c (0x03) is left
++ * ungated on purpose - it's the normal way back to the monitor while
++ * Linux is running and is never sent by ordinary typed text, so it
++ * still stops the CPU immediately as before (does not reach this RX
++ * latch).  Paste can still drop characters (single-byte latch).
++ *
++ * FPGA (2026-10-30, AS): RX is interrupt driven when the DT node has an
++ * interrupt (riscv-intc hwirq 11 = machine external interrupt).  Each
++ * received byte pulses ext_uart_interrpt_1shot; interrupter.v latches it in
++ * SYS_INT_STATUS bit0 (if SYS_INT_ENABLE bit0 and mie.MEIE are set), which
++ * drives mip.MEIP until software writes 0 to that bit.  Without an
++ * interrupt in the DT the driver falls back to the old 10 ms timer poll. */
++#define MYUART_RX_REG     ((volatile uint32_t *)0xC000FC0C)
++#define MYUART_RXEC_REG   ((volatile uint32_t *)0xC000FC10)
++#define MYUART_INT_EN_REG ((volatile uint32_t *)0xC000FA00) /* bit0 RX, bit1 ext pin */
++#define MYUART_INT_ST_REG ((volatile uint32_t *)0xC000FA04) /* write 0 to clear a bit */
++
++static struct timer_list myuart_rx_timer;
++static struct uart_port *myuart_rx_port;
++static int myuart_rx_irq;              /* 0 = timer poll */
++static DEFINE_PER_CPU(struct uart_port *, myuart_irq_cookie);
++
++static void myuart_rx_read(struct uart_port *port)
++{
++    uint32_t v = *MYUART_RX_REG;   /* read consumes data + clears flags */
++
++    if (port && (v & 0x100)) {
++        struct tty_port *tport = &port->state->port;
++
++        if (v & 0x200)
++            port->icount.overrun++;
++        port->icount.rx++;
++        tty_insert_flip_char(tport, v & 0xff, TTY_NORMAL);
++        tty_flip_buffer_push(tport);
++    }
++}
++
++static void myuart_rx_poll(struct timer_list *t)
++{
++    struct uart_port *port = READ_ONCE(myuart_rx_port);
++
++    myuart_rx_read(port);
++    if (port)
++        mod_timer(&myuart_rx_timer, jiffies + msecs_to_jiffies(10));
++}
++
++static irqreturn_t myuart_rx_interrupt(int irq, void *dev_id)
++{
++    /* Clear the latched RX status before reading the data, so a byte that
++     * arrives after the read raises a new interrupt.  Bit1 (ext pin) is
++     * written as 1, which leaves it alone. */
++    *MYUART_INT_ST_REG = 0x2;
++    myuart_rx_read(READ_ONCE(myuart_rx_port));
++    return IRQ_HANDLED;
++}
++
++static int  myuart_startup(struct uart_port *port)
++{
++    *MYUART_RXEC_REG = 1;          /* no hardware echo-back */
++    (void)*MYUART_RX_REG;          /* flush any stale byte/flags */
++    WRITE_ONCE(myuart_rx_port, port);
++    if (myuart_rx_irq) {
++        *MYUART_INT_ST_REG = 0x2;
++        *MYUART_INT_EN_REG = 1;
++        enable_percpu_irq(myuart_rx_irq, IRQ_TYPE_NONE);   /* sets mie.MEIE */
++    } else {
++        mod_timer(&myuart_rx_timer, jiffies + msecs_to_jiffies(10));
++    }
++    return 0;
++}
++
++static void myuart_shutdown(struct uart_port *port)
++{
++    if (myuart_rx_irq) {
++        disable_percpu_irq(myuart_rx_irq);
++        *MYUART_INT_EN_REG = 0;
++    }
++    WRITE_ONCE(myuart_rx_port, NULL);
++    timer_delete_sync(&myuart_rx_timer);
++}
++static void myuart_set_termios(struct uart_port *port,
++                               struct ktermios *new,
++                               const struct ktermios *old) {}
++static const char *myuart_type(struct uart_port *port) { return "myuart"; }
++static void myuart_release_port(struct uart_port *port) {}
++static int  myuart_request_port(struct uart_port *port) { return 0; }
++/*
++ * FPGA (2026-10-27): the port type must NOT be PORT_UNKNOWN - serial_core's
++ * uart_port_startup() returns 1 for PORT_UNKNOWN without calling ->startup,
++ * and uart_startup() then sets TTY_IO_ERROR, so every write()/read() on
++ * /dev/console returned -EIO (PID1's stderr writev, kernel#843) and the RX
++ * poll timer was never armed. No upstream PORT_* id fits; 124 is unused.
++ */
++#define PORT_MYUART 124
++
++static void myuart_config_port(struct uart_port *port, int flags)
++{
++    if (flags & UART_CONFIG_TYPE)
++        port->type = PORT_MYUART;
++}
++static int myuart_verify_port(struct uart_port *port,
++                              struct serial_struct *ser) { return 0; }
++
++static const struct uart_ops myuart_ops = {
++    .tx_empty     = myuart_tx_empty,
++    .set_mctrl    = myuart_set_mctrl,
++    .get_mctrl    = myuart_get_mctrl,
++    .stop_tx      = myuart_stop_tx,
++    .start_tx     = myuart_start_tx,
++    .stop_rx      = myuart_stop_rx,
++    .startup      = myuart_startup,
++    .shutdown     = myuart_shutdown,
++    .set_termios  = myuart_set_termios,
++    .type         = myuart_type,
++    .release_port = myuart_release_port,
++    .request_port = myuart_request_port,
++    .config_port  = myuart_config_port,
++    .verify_port  = myuart_verify_port,
++};
++
++#define MYUART_MAX_PORTS 1
++static struct uart_port myuart_ports[MYUART_MAX_PORTS];
++static struct uart_driver myuart_driver;
++
++static void myuart_console_write(struct console *co,
++                                 const char *s, unsigned int n)
++{
++    unsigned long flags;
++    struct uart_port *port;
++    local_irq_save(flags);
++    port = &myuart_ports[co->index];
++    uart_console_write(port, s, n, myuart_putchar);
++    local_irq_restore(flags);
++}
++
++static int myuart_console_setup(struct console *co, char *options)
++{
++    //if (co->index < 0 || co->index >= MYUART_MAX_PORTS)
++        //return -ENODEV;
++    //if (!myuart_ports[co->index].membase)
++        //return -ENODEV;
++	myuart_ports[0].membase = (void __iomem *)0xC000FC00;
++    return 0;
++}
++
++    //.name   = "ttyMY",
++    //.index  = -1,
++struct console myuart_console = {
++    .name   = "ttyMY",
++    .write  = myuart_console_write,
++    .device = uart_console_device,
++    .setup  = myuart_console_setup,
++    .flags  = CON_PRINTBUFFER | CON_ENABLED,
++    .index  = 0,
++    .data   = &myuart_driver,
++};
++
++static struct uart_driver myuart_driver = {
++    .owner       = THIS_MODULE,
++    .driver_name = "myuart",
++    .dev_name    = "ttyMY",
++    .nr          = MYUART_MAX_PORTS,
++    .cons        = &myuart_console,
++};
++
++static int myuart_probe(struct platform_device *pdev)
++{
++    struct uart_port *port;
++    struct resource  *res;
++    int ret, irq;
++
++    if (pdev->id >= MYUART_MAX_PORTS)
++        return -EINVAL;
++
++    port = &myuart_ports[pdev->id < 0 ? 0 : pdev->id];
++    memset(port, 0, sizeof(*port));
++
++    res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++    if (!res)
++        return -ENODEV;
++
++    port->membase = devm_ioremap_resource(&pdev->dev, res);
++    if (IS_ERR(port->membase))
++        return PTR_ERR(port->membase);
++
++    port->mapbase = res->start;
++    port->ops     = &myuart_ops;
++    port->type    = PORT_MYUART;
++    port->dev     = &pdev->dev;
++    port->line    = pdev->id < 0 ? 0 : pdev->id;
++    port->iotype  = UPIO_MEM;
++    port->flags   = UPF_BOOT_AUTOCONF;
++
++    timer_setup(&myuart_rx_timer, myuart_rx_poll, 0);
++
++    /* riscv-intc interrupts are per-CPU (percpu_devid) */
++    irq = platform_get_irq_optional(pdev, 0);
++    if (irq > 0) {
++        ret = request_percpu_irq(irq, myuart_rx_interrupt, "myuart",
++                                 &myuart_irq_cookie);
++        if (ret)
++            dev_warn(&pdev->dev, "irq %d request failed (%d), polling RX\n",
++                     irq, ret);
++        else
++            myuart_rx_irq = port->irq = irq;
++    }
++    dev_info(&pdev->dev, "RX %s\n", myuart_rx_irq ? "interrupt driven" : "polled");
++
++    ret = uart_add_one_port(&myuart_driver, port);
++    if (ret)
++        return ret;
++
++    platform_set_drvdata(pdev, port);
++    return 0;
++}
++
++static void myuart_remove(struct platform_device *pdev)
++{
++    struct uart_port *port = platform_get_drvdata(pdev);
++    uart_remove_one_port(&myuart_driver, port);
++}
++
++static const struct of_device_id myuart_of_match[] = {
++    { .compatible = "myvendor,myuart" },
++    {}
++};
++MODULE_DEVICE_TABLE(of, myuart_of_match);
++
++static struct platform_driver myuart_platform_driver = {
++    .probe  = myuart_probe,
++    .remove = myuart_remove,
++    .driver = {
++        .name           = "myuart",
++        .of_match_table = myuart_of_match,
++    },
++};
++
++static int __init myuart_console_init(void)
++{
++    /* FPGA (2026-10-29, #881): init/main.c is back to upstream and no longer
++     * registers myuart_console by hand before initcalls, so do it here. */
++    register_console(&myuart_console);
++    return 0;
++}
++
++
++static int __init myuart_init(void)
++{
++    int ret;
++
++    ret = uart_register_driver(&myuart_driver);
++    if (ret)
++        return ret;
++    ret = platform_driver_register(&myuart_platform_driver);
++    if (ret) {
++        uart_unregister_driver(&myuart_driver);
++    }
++    return ret;
++}
++
++static void __exit myuart_exit(void)
++{
++    platform_driver_unregister(&myuart_platform_driver);
++    uart_unregister_driver(&myuart_driver);
++}
++
++console_initcall(myuart_console_init);
++//console_initcall(myuart_init);
++
++module_init(myuart_init);
++module_exit(myuart_exit);
++
++MODULE_DESCRIPTION("My Custom FPGA UART Driver");
++MODULE_LICENSE("GPL");
+diff --git a/arch/riscv/boot/dts/myfpga/Makefile b/arch/riscv/boot/dts/myfpga/Makefile
+new file mode 100644
+index 000000000..23feb3e90
+--- /dev/null
++++ b/arch/riscv/boot/dts/myfpga/Makefile
+@@ -0,0 +1 @@
++dtb-y += my_fpga.dtb
+diff --git a/arch/riscv/boot/dts/myfpga/my_fpga.dts b/arch/riscv/boot/dts/myfpga/my_fpga.dts
+new file mode 100644
+index 000000000..3b57fe87c
+--- /dev/null
++++ b/arch/riscv/boot/dts/myfpga/my_fpga.dts
+@@ -0,0 +1,93 @@
++/* my_fpga.dts */
++/dts-v1/;
++
++/ {
++    #address-cells = <1>;
++    #size-cells    = <1>;
++    compatible = "myvendor,my-fpga-riscv";
++
++memory@400000 {
++    device_type = "memory";
++    /* FPGA (2026-07-05): retrying the full 128MB hardware DRAM range.
++     * This was previously attempted and reverted to 4MB-64MB (60MB)
++     * after it caused an immediate crash/reset loop elsewhere in mm
++     * init (root cause not identified at the time). That revert
++     * predates this session's discovery and RTL-side fix of the
++     * self-modifying-code/DRAM-timing wild-jump hazard - it's plausible
++     * the wider memory map simply made that hazard easier to hit (more
++     * memblock/page-allocator activity, different top-down allocation
++     * addresses), not that this memory node's size is itself a problem.
++     * Now that the RTL fix has held clean across multiple boots, retry
++     * with the real 128MB ceiling (see arch/riscv/kernel/head.S for the
++     * matching boot-stack-pointer move). If this reproduces the old
++     * crash/reset loop, revert both this and head.S together. */
++    reg = <0x00400000 0x07C00000>; /* 4MB to 128MB (124MB) */
++};
++
++    cpus {
++        #address-cells = <1>;
++        #size-cells    = <0>;
++        /* timebase-frequency = <50000000>; */
++        timebase-frequency = <50000000>;
++        cpu0: cpu@0 {
++            device_type = "cpu";
++            compatible  = "riscv";
++            riscv,isa   = "rv32ima";
++            reg         = <0>;
++
++            cpu0_intc: interrupt-controller {
++                interrupt-parent;
++                compatible = "riscv,cpu-intc";
++                interrupt-controller;
++                #interrupt-cells = <1>;
++            };
++        };
++    };
++
++    soc {
++        #address-cells = <1>;
++        #size-cells    = <1>;
++        compatible     = "simple-bus";
++        ranges;
++		interrupt-parent = <&cpu0_intc>;
++
++        /* ★あなたのUARTアドレスに合わせる★ */
++        uart0: uart@c000fc00 {
++            compatible  = "myvendor,myuart";
++            reg         = <0xc000fc00 0x100>;
++			clock-frequency = <50000000>;
++            /* RX interrupt -> mip.MEIP (machine external, hwirq 11) */
++            interrupts-extended = <&cpu0_intc 11>;
++        };
++
++		clint0: clint@c000f800 {
++    		compatible = "riscv,clint0","sifive,clint0";
++    		reg = <0xc000f800 0x100>;
++
++    		/* interrupts-extended = < &cpu0_intc 7>; */
++    		interrupts-extended =  <&cpu0_intc 3 &cpu0_intc 7>; 
++		};
++
++    };
++
++    chosen {
++        /* The only copy of the kernel command line (make_image_reloc.py
++         * no longer pokes boot_command_line). Add slub_debug=FZPU /
++         * keep_bootcon here again when hunting memory corruption. */
++        bootargs = "earlycon=myuart,mmio32,0xc000fc00 console=ttyMY0,921600 log_buf_len=64K root=/dev/ram rdinit=/init loglevel=8";
++		linux,initrd-start = <0x00900000>;
++		/* FPGA (2026-07-16): 0x913000 was sized for the old 74KB
++		 * initramfs and silently truncated the current 978KB
++		 * busybox cpio (end 0x9EEE0C) to its first 77KB - /init
++		 * (last member) was never extracted. 0xA00000 gives fixed
++		 * headroom; make_image_reloc.py now hard-fails if the cpio
++		 * outgrows this window (keep both values in sync). The gap
++		 * between the real cpio end and 0xA00000 is zero-filled by
++		 * the image build, which the cpio unpacker skips cleanly.
++		 * 2026-10-27: widened 0xA00000 -> 0xB00000 for the rebuilt
++		 * busybox (hush + echo/mount/ls/cat/dmesg/... applets, static-
++		 * pie glibc, ~1.12MB) which no longer fits in 1MB. */
++		linux,initrd-end   = <0x00B00000>;
++        stdout-path = "/soc/uart@c000fc00";
++    };
++};
