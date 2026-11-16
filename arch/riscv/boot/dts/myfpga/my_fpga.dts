@@ -8,20 +8,15 @@
 
 memory@400000 {
     device_type = "memory";
-    /* FPGA (2026-07-05): retrying the full 128MB hardware DRAM range.
-     * This was previously attempted and reverted to 4MB-64MB (60MB)
-     * after it caused an immediate crash/reset loop elsewhere in mm
-     * init (root cause not identified at the time). That revert
-     * predates this session's discovery and RTL-side fix of the
-     * self-modifying-code/DRAM-timing wild-jump hazard - it's plausible
-     * the wider memory map simply made that hazard easier to hit (more
-     * memblock/page-allocator activity, different top-down allocation
-     * addresses), not that this memory node's size is itself a problem.
-     * Now that the RTL fix has held clean across multiple boots, retry
-     * with the real 128MB ceiling (see arch/riscv/kernel/head.S for the
-     * matching boot-stack-pointer move). If this reproduces the old
-     * crash/reset loop, revert both this and head.S together. */
-    reg = <0x00400000 0x07C00000>; /* 4MB to 128MB (124MB) */
+    /* FPGA (2026-11-16): 64MB configuration. The board DRAM is used up to
+     * 64MB; 0x0-0x400000 is not declared (the kernel image itself is
+     * linked at 0 and lives there). All fixed overlays sit well below
+     * this: kernel _end (~0x629000), CODE@0x800000, DTB@0x801000,
+     * initrd 0x900000-0xB00000. The earlier 128MB value was
+     * <0x00400000 0x07C00000>; the fixed boot stack at 0x06000000 that it
+     * used to require is gone from head.S, so nothing else depends on the
+     * RAM size. */
+    reg = <0x00400000 0x03C00000>; /* 4MB to 64MB (60MB) */
 };
 
     cpus {

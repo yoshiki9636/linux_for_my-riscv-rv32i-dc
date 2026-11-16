@@ -29,6 +29,12 @@ arch/riscv/boot/dts/myfpga/Makefile
 arch/riscv/boot/dts/myfpga/my_fpga.dts
 ```
 
+2026-11-16 から `my_fpga.dts` のメモリは 64MB 構成
+(`memory@400000`、`reg = <0x00400000 0x03C00000>`、Linux が使うのは 4MB〜64MB の 60MB)。
+それまでは 128MB 構成(`<0x00400000 0x07C00000>`)だった。RAM サイズに依存するのはこの1行だけで、
+カーネル(`_end` ≒ 0x629000)、CODE(0x800000)、DTB(0x801000)、initrd(0x900000〜0xB00000)の
+配置は 64MB でも 128MB でも同じ。
+
 ## 3. パッチ
 
 ```
